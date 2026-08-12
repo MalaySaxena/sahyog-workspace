@@ -7,6 +7,7 @@ import plotly.express as px
 import json
 import re
 import numpy as np
+import io
 
 
 import subprocess
@@ -93,18 +94,6 @@ def check_credentials(username, password):
     except Exception:
         pass
 
-    default_users = {
-        "admin": "sahyog2026",
-        "sahyog": "wealth123",
-        "malay": "malay@sahyog",
-        "shishir": "shishir@sahyog",
-        "neelesh": "neelesh@sahyog",
-        "krati": "krati@sahyog",
-        "ayush": "ayush@sahyog",
-        "aayushi": "aayushi@sahyog",
-        "amit": "amit@sahyog",
-        "ruchi": "ruchi@sahyog"
-    }
     return clean_username in default_users and default_users[clean_username] == password
 
 
@@ -114,7 +103,7 @@ def render_login_screen():
         st.markdown("""
             <div style="background-color: #f8f9fa; padding: 30px; border-radius: 12px; border-top: 6px solid #1F4E79; box-shadow: 0 4px 12px rgba(0,0,0,0.1); margin-top: 40px;">
                 <h2 style="color: #1F4E79; text-align: center; margin-bottom: 5px;">🏦 Sahyog Financials</h2>
-                <p style="text-align: center; color: #6c757d; font-size: 14px;">Enterprise Workspace Console Login (v10.3)</p>
+                <p style="text-align: center; color: #6c757d; font-size: 14px;">Enterprise Workspace Console Login (v10.5)</p>
                 <hr style="margin-bottom: 20px;">
             </div>
         """, unsafe_allow_html=True)
@@ -221,6 +210,68 @@ def lookup_brokerage_weight(scheme_name, weight_map):
 # Authorized Users List for Book Summary & Analytics Desk
 ALLOWED_ANALYTICS_USERS = ["admin", "malay", "shishir", "sahyog", "ruchi", "neelesh"]
 
+def is_gdrive_configured():
+    try:
+        return ("gcp_service_account" in st.secrets) and ("gdrive" in st.secrets and "file_id" in st.secrets["gdrive"])
+    except Exception:
+        return False
+
+def get_gdrive_service():
+    from google.oauth2.service_account import Credentials
+    from googleapiclient.discovery import build
+    
+    scopes = ["https://www.googleapis.com/auth/drive"]
+    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
+    return build("drive", "v3", credentials=creds)
+
+def sync_gdrive_to_local():
+    """Downloads latest Live_Wealth_Manager_Book.xlsx from Google Drive to local workspace."""
+    if is_gdrive_configured():
+        try:
+            from googleapiclient.http import MediaIoBaseDownload
+            service = get_gdrive_service()
+            file_id = st.secrets["gdrive"]["file_id"]
+            
+            request = service.files().get_media(fileId=file_id)
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+                
+            fh.seek(0)
+            with open(EXCEL_FILE, "wb") as f:
+                f.write(fh.read())
+            return True
+        except Exception as e:
+            st.sidebar.error(f"⚠️ GDrive Sync Download Error: {e}")
+            return False
+    return False
+
+def sync_local_to_gdrive():
+    """Uploads updated local Live_Wealth_Manager_Book.xlsx back to Google Drive."""
+    if is_gdrive_configured():
+        try:
+            from googleapiclient.http import MediaFileUpload
+            service = get_gdrive_service()
+            file_id = st.secrets["gdrive"]["file_id"]
+            
+            media = MediaFileUpload(
+                EXCEL_FILE,
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                resumable=True
+            )
+            service.files().update(
+                fileId=file_id,
+                media_body=media
+            ).execute()
+            return True
+        except Exception as e:
+            st.error(f"⚠️ GDrive Sync Upload Error: {e}")
+            return False
+    return False
+
+
 def is_gsheets_configured():
     try:
         return ("gcp_service_account" in st.secrets) and ("gsheets" in st.secrets and "spreadsheet_url" in st.secrets["gsheets"])
@@ -270,6 +321,7 @@ init_excel_ledger()
 
 @st.cache_data(ttl=5)
 def load_all_data():
+    sync_gdrive_to_local()
     try:
         df_c = pd.read_excel(EXCEL_FILE, sheet_name="2. Client AUM Master")
         df_s = pd.read_excel(EXCEL_FILE, sheet_name="3. Scheme Allocation Master")
@@ -336,6 +388,7 @@ def save_transaction_record(record):
             ws_ex = wb["4. Transaction Ledger"]
         ws_ex.append(row_values)
         wb.save(EXCEL_FILE)
+        sync_local_to_gdrive()
     except Exception:
         pass
         
@@ -365,6 +418,7 @@ def overwrite_ledger_database(df_updated):
         for row in df_updated.fillna("").values.tolist():
             ws_ex.append(row)
         wb.save(EXCEL_FILE)
+        sync_local_to_gdrive()
     except Exception as e:
         st.error(f"❌ Excel Update Error: {e}")
         
@@ -566,11 +620,43 @@ def build_sheet2_from_client_files(client_files_input):
             parsed_rows = parse_client_dataframe(raw_input, code_str)
             all_rows.extend(parsed_rows)
 
+    check_dirs = [".", os.path.join(os.path.dirname(__file__), "temp_downloads")]
+    additional_other_files = [
+        ("31241_ot", ["client_31241_Others.xlsx", "client_31241_others.xlsx", "31241_Others.xlsx", "31241_others.xlsx"]),
+        ("43854_ot", ["client_43854_Others.xlsx", "client_43854_others.xlsx", "43854_Others.xlsx", "43854_others.xlsx"])
+    ]
+
+    for target_code, fnames in additional_other_files:
+        for cdir in check_dirs:
+            for fn in fnames:
+                fpath = os.path.join(cdir, fn)
+                if os.path.exists(fpath):
+                    try:
+                        xls = pd.ExcelFile(fpath)
+                        for sname in xls.sheet_names:
+                            key = f"{os.path.basename(fpath)}::{sname}"
+                            if key not in processed_file_sheets:
+                                df_sheet = pd.read_excel(fpath, sheet_name=sname)
+                                parsed_rows = parse_client_dataframe(df_sheet, target_code)
+                                all_rows.extend(parsed_rows)
+                                processed_file_sheets.add(key)
+                    except Exception as e:
+                        print(f"Error reading additional client file {fpath}: {e}")
+
     df_res = pd.DataFrame(all_rows, columns=CLIENT_MASTER_SCHEMA)
 
     if not df_res.empty:
-        code_order = {31241.0: 1, 19221.0: 2, 43854.0: 3, 72021.0: 4}
-        df_res['Sort_Order'] = df_res['Code'].map(lambda x: code_order.get(float(x) if str(x).replace('.','').isdigit() else x, 99))
+        code_order = {31241.0: 1, '31241_ot': 2, 19221.0: 3, 43854.0: 4, '43854_ot': 5, 72021.0: 6}
+        def get_client_sort_key(c):
+            if c in code_order: return code_order[c]
+            try:
+                f_c = float(c)
+                if f_c in code_order: return code_order[f_c]
+            except Exception:
+                pass
+            return 99
+
+        df_res['Sort_Order'] = df_res['Code'].map(get_client_sort_key)
         df_res = df_res.sort_values(by=['Sort_Order']).drop(columns=['Sort_Order']).reset_index(drop=True)
 
     # Recalculate single Total Book row
@@ -779,7 +865,7 @@ def parse_aum_dataframe(df_raw, code_val):
 def build_sheet3_from_aum_files(aum_files_input):
     """
     Safely handles dict or list input, parses AUM report DataFrames and extra sheets
-    (aum_31241_Others -> appended under code 31241_ot, aum_43854_Others -> appended under code 43854_ot),
+    (aum_31241_Others -> appended under code 31241, aum_43854_Others -> appended under code 43854),
     and appends a single 'Total Book' summary row.
     """
     all_rows = []
@@ -809,11 +895,7 @@ def build_sheet3_from_aum_files(aum_files_input):
                 for sname in xls.sheet_names:
                     s_lower = sname.strip().lower()
 
-                    if "31241_others" in s_lower or "31241_ot" in s_lower or "31241_other" in s_lower:
-                        target_code = "31241_ot"
-                    elif "43854_others" in s_lower or "43854_ot" in s_lower or "43854_other" in s_lower:
-                        target_code = "43854_ot"
-                    elif "31241" in s_lower:
+                    if "31241" in s_lower:
                         target_code = "31241"
                     elif "43854" in s_lower:
                         target_code = "43854"
@@ -860,7 +942,7 @@ def build_sheet3_from_aum_files(aum_files_input):
     df_res = pd.DataFrame(all_rows, columns=SCHEME_MASTER_SCHEMA)
 
     if not df_res.empty:
-        code_order = {31241.0: 1, '31241_ot': 2, 19221.0: 3, 43854.0: 4, '43854_ot': 5, 72021.0: 6}
+        code_order = {31241.0: 1, 19221.0: 2, 43854.0: 3, 72021.0: 4}
         def get_sort_key(c):
             if c in code_order: return code_order[c]
             try:
@@ -928,6 +1010,7 @@ def update_master_sheets_from_all_codes(client_files_input, aum_files_input):
 
         wb.save(EXCEL_FILE)
         wb.close()
+        sync_local_to_gdrive()
 
         st.cache_data.clear()
         return True
@@ -944,7 +1027,7 @@ def update_master_sheets_from_all_codes(client_files_input, aum_files_input):
 # 3. INTERFACE NAVIGATION PANEL & SIDEBAR CONTROLS
 # -----------------------------------------------------------------------------
 st.sidebar.title("🛠️ Sahyog Financials Workspace")
-st.sidebar.caption("Enterprise Consolidated Architecture v10.3")
+st.sidebar.caption("Enterprise Consolidated Architecture v10.5")
 
 current_user = st.session_state.get("username", "User")
 st.sidebar.info(f"👤 Logged in as: **{current_user}**")
@@ -953,7 +1036,11 @@ if st.sidebar.button("🚪 Logout", use_container_width=True):
     st.session_state["username"] = None
     st.rerun()
 
-if is_gsheets_configured():
+if is_gdrive_configured() and is_gsheets_configured():
+    st.sidebar.success("🟢 Backend: GDrive Storage & Live GSheets API")
+elif is_gdrive_configured():
+    st.sidebar.success("🟢 Backend: Live Google Drive Storage Sync")
+elif is_gsheets_configured():
     st.sidebar.success("🟢 Backend: Live Google Sheets API")
 else:
     st.sidebar.warning("🟡 Backend: Local Excel (Add Secrets for Cloud Sync)")
@@ -1387,15 +1474,17 @@ elif workspace == "📊 Book Summary & Analytics":
             "🏢 Asset House Concentration"
         ])
         
-        total_aum_base = df_master_clients['Current Total AUM'].sum()
-        equity_base = df_master_clients['Current Equity AUM'].sum()
-        hybrid_base = df_master_clients['Current Hybrid AUM'].sum()
-        debt_base = df_master_clients['Current Debt AUM'].sum()
+        total_aum_base = df_master_schemes['Current AUM Total (₹)'].sum()
+        equity_base = df_master_schemes['Equity AUM (₹)'].sum()
+        hybrid_base = df_master_schemes['Hybrid AUM (₹)'].sum()
+        debt_base = df_master_schemes['Debt AUM (₹)'].sum()
+
+        total_client_aum_base = df_master_clients['Current Total AUM'].sum()
         
         with tab1:
             c1, c2, c3, c4 = st.columns(4)
             with c1:
-                st.markdown(f"<div class='metric-card'><h5>Consolidated AUA</h5><h3>₹{total_aum_base:,.2f}</h3></div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='metric-card'><h5>Consolidated AUM</h5><h3>₹{total_aum_base:,.2f}</h3></div>", unsafe_allow_html=True)
             with c2:
                 st.markdown(f"<div class='metric-card'><h5>Monitored Investors</h5><h3>{len(df_master_clients)} Accounts</h3></div>", unsafe_allow_html=True)
             with c3:
@@ -1435,7 +1524,7 @@ elif workspace == "📊 Book Summary & Analytics":
                 Accounts=('Investor Name', 'count'),
                 Combined_AUM=('Current Total AUM', 'sum')
             ).reset_index()
-            xirr_dist['AUM Share %'] = (xirr_dist['Combined_AUM'] / total_aum_base) * 100
+            xirr_dist['AUM Share %'] = (xirr_dist['Combined_AUM'] / (total_client_aum_base if total_client_aum_base > 0 else 1)) * 100
 
             st.dataframe(
                 xirr_dist.style.format({
@@ -1446,7 +1535,7 @@ elif workspace == "📊 Book Summary & Analytics":
             )
 
         
-        # TAB FOR INTERACTIVE SCHEME INSIGHTS & EXPLORER
+                        # TAB FOR INTERACTIVE SCHEME INSIGHTS & EXPLORER
         with tab_schemes:
             st.markdown("### 📈 Interactive Scheme Explorer & Revenue Analytics")
             st.caption("Filter, slice, and analyze scheme performance, concentration risk, yield optimization, asset allocation, and brokerage multipliers across fund houses and license codes.")
@@ -1824,7 +1913,6 @@ elif workspace == "📊 Book Summary & Analytics":
                 mime="text/csv"
             )
 
-
         # TAB 2: SCHEME RATIONALIZATION & PORTFOLIO TRIMMING DESK
         with tab2:
             st.markdown("### 🎯 Scheme Rationalization & Portfolio Trimming Desk")
@@ -1934,7 +2022,7 @@ elif workspace == "📊 Book Summary & Analytics":
             
             order_map_t3 = {'31241': 1, '31241_ot': 2, '19221': 3, '43854': 4, '43854_ot': 5, '72021': 6}
             code_summary_schemes['Sort_Order'] = code_summary_schemes['Code_Str'].map(lambda x: order_map_t3.get(str(x), 99))
-            code_summary_schemes = code_summary_schemes.sort_values(by='Sort_Order').drop(columns=['Sort_Order']).reset_index(drop=True)
+            code_summary_schemes = code_summary_schemes.sort_values(by=['Sort_Order']).drop(columns=['Sort_Order']).reset_index(drop=True)
             
             st.dataframe(
                 code_summary_schemes.rename(columns={
@@ -1996,7 +2084,7 @@ elif workspace == "📊 Book Summary & Analytics":
                 Combined_AUM=('Current Total AUM', 'sum'),
                 Accounts_Count=('Investor Name', 'count')
             ).reset_index()
-            tier_perf['AUM Contribution %'] = (tier_perf['Combined_AUM'] / total_aum_base) * 100
+            tier_perf['AUM Contribution %'] = (tier_perf['Combined_AUM'] / (total_client_aum_base if total_client_aum_base > 0 else 1)) * 100
             
             st.dataframe(
                 tier_perf.style.format({
