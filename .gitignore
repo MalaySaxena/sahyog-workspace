@@ -1,0 +1,5 @@
+# Ignore local secrets and downloads
+.streamlit/secrets.toml
+temp_downloads/
+*.xlsx
+sync_log.json
