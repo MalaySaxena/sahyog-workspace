@@ -8,8 +8,6 @@ import json
 import re
 import numpy as np
 import io
-
-
 import subprocess
 
 def ensure_playwright_browsers():
@@ -84,6 +82,35 @@ def clean_int_string(val):
     return val_str
 
 
+def format_date_val(d):
+    """Converts Date object or tuple to YYYY-MM-DD string, returning empty string if blank/None."""
+    if d is None:
+        return ""
+    if isinstance(d, (list, tuple)):
+        if len(d) == 0 or d[0] is None:
+            return ""
+        d = d[0]
+    if hasattr(d, "strftime"):
+        return d.strftime("%Y-%m-%d")
+    s = str(d).strip()
+    if s.lower() in ["none", "nat", "nan", ""]:
+        return ""
+    return s
+
+
+DEFAULT_USERS = {
+    "admin": "sahyog2026",
+    "sahyog": "wealth123",
+    "malay": "malay@sahyog",
+    "shishir": "shishir@sahyog",
+    "neelesh": "neelesh@sahyog",
+    "krati": "krati@sahyog",
+    "ayush": "ayush@sahyog",
+    "aayushi": "aayushi@sahyog",
+    "amit": "amit@sahyog",
+    "ruchi": "ruchi@sahyog"
+}
+
 def check_credentials(username, password):
     clean_username = username.strip().lower()
     try:
@@ -94,7 +121,7 @@ def check_credentials(username, password):
     except Exception:
         pass
 
-    return clean_username in default_users and default_users[clean_username] == password
+    return clean_username in DEFAULT_USERS and DEFAULT_USERS[clean_username] == password
 
 
 def render_login_screen():
@@ -103,24 +130,50 @@ def render_login_screen():
         st.markdown("""
             <div style="background-color: #f8f9fa; padding: 30px; border-radius: 12px; border-top: 6px solid #1F4E79; box-shadow: 0 4px 12px rgba(0,0,0,0.1); margin-top: 40px;">
                 <h2 style="color: #1F4E79; text-align: center; margin-bottom: 5px;">🏦 Sahyog Financials</h2>
-                <p style="text-align: center; color: #6c757d; font-size: 14px;">Enterprise Workspace Console Login (v10.5)</p>
+                <p style="text-align: center; color: #6c757d; font-size: 14px;">Enterprise Workspace Console Login (v10.0)</p>
                 <hr style="margin-bottom: 20px;">
             </div>
         """, unsafe_allow_html=True)
-        
+
+        if "login_attempts" not in st.session_state:
+            st.session_state["login_attempts"] = 0
+        if "lockout_until" not in st.session_state:
+            st.session_state["lockout_until"] = None
+
+        now = datetime.datetime.now()
+        if st.session_state["lockout_until"]:
+            if now < st.session_state["lockout_until"]:
+                remaining_sec = int((st.session_state["lockout_until"] - now).total_seconds())
+                st.error(f"🚫 **Access Temporarily Locked:** Too many failed login attempts. Please wait {remaining_sec}s before retrying.")
+                st.stop()
+            else:
+                st.session_state["lockout_until"] = None
+                st.session_state["login_attempts"] = 0
+
         with st.form("login_form"):
             username_input = st.text_input("👤 Username")
             password_input = st.text_input("🔑 Password", type="password")
             submit_login = st.form_submit_button("Sign In to Workspace", use_container_width=True)
             
             if submit_login:
-                if check_credentials(username_input, password_input.strip()):
+                if not username_input or not password_input:
+                    st.warning("⚠️ Please enter both Username and Password.")
+                elif check_credentials(username_input, password_input.strip()):
                     st.session_state["authenticated"] = True
                     st.session_state["username"] = username_input.strip()
+                    st.session_state["login_attempts"] = 0
+                    st.session_state["lockout_until"] = None
                     st.success("✅ Login successful! Loading workspace...")
                     st.rerun()
                 else:
-                    st.error("❌ Invalid Username or Password. Please try again.")
+                    st.session_state["login_attempts"] += 1
+                    attempts_left = max(0, 5 - st.session_state["login_attempts"])
+                    if st.session_state["login_attempts"] >= 5:
+                        st.session_state["lockout_until"] = datetime.datetime.now() + datetime.timedelta(minutes=5)
+                        st.error("🚫 **Maximum login attempts (5) reached.** Account locked for 5 minutes to prevent unauthorized access.")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ Invalid Username or Password. ({attempts_left} attempt(s) remaining before 5-minute lockout).")
 
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
@@ -209,6 +262,9 @@ def lookup_brokerage_weight(scheme_name, weight_map):
 
 # Authorized Users List for Book Summary & Analytics Desk
 ALLOWED_ANALYTICS_USERS = ["admin", "malay", "shishir", "sahyog", "ruchi", "neelesh"]
+
+# PRIMARY DESIGNATED SYNC ADMINISTRATOR USERS LIST
+PRIMARY_SYNC_USERS = ["admin", "malay"]
 
 def is_gdrive_configured():
     try:
@@ -366,19 +422,25 @@ df_master_clients, df_master_schemes, df_ledger = load_all_data()
 client_options = sorted(df_master_clients['Investor Name'].dropna().unique().tolist()) if not df_master_clients.empty else []
 scheme_options = sorted(df_master_schemes['Mutual Fund Scheme Name'].dropna().unique().tolist()) if not df_master_schemes.empty else []
 
-def save_transaction_record(record):
-    row_values = [record.get(col, "") for col in SCHEMA_COLUMNS]
+def save_transaction_records(records_list):
+    """Saves single or batch transaction records atomically to GSheets and local/GDrive Excel."""
+    if not records_list:
+        return False
+    if isinstance(records_list, dict):
+        records_list = [records_list]
+
     saved_to_gsheets = False
-    
+    all_rows = [[rec.get(col, "") for col in SCHEMA_COLUMNS] for rec in records_list]
+
     if is_gsheets_configured():
         ws = get_gspread_worksheet("4. Transaction Ledger")
         if ws:
             try:
-                ws.append_row(row_values)
+                ws.append_rows(all_rows)
                 saved_to_gsheets = True
             except Exception as e:
                 st.error(f"❌ Failed to write to Google Sheets: {e}")
-                
+
     try:
         wb = openpyxl.load_workbook(EXCEL_FILE)
         if "4. Transaction Ledger" not in wb.sheetnames:
@@ -386,14 +448,18 @@ def save_transaction_record(record):
             ws_ex.append(SCHEMA_COLUMNS)
         else:
             ws_ex = wb["4. Transaction Ledger"]
-        ws_ex.append(row_values)
+        for row in all_rows:
+            ws_ex.append(row)
         wb.save(EXCEL_FILE)
         sync_local_to_gdrive()
-    except Exception:
-        pass
-        
+    except Exception as e:
+        st.error(f"❌ Local Excel Error: {e}")
+
     st.cache_data.clear()
     return saved_to_gsheets
+
+def save_transaction_record(record):
+    return save_transaction_records([record])
 
 def overwrite_ledger_database(df_updated):
     saved_to_gsheets = False
@@ -865,7 +931,7 @@ def parse_aum_dataframe(df_raw, code_val):
 def build_sheet3_from_aum_files(aum_files_input):
     """
     Safely handles dict or list input, parses AUM report DataFrames and extra sheets
-    (aum_31241_Others -> appended under code 31241, aum_43854_Others -> appended under code 43854),
+    (aum_31241_Others -> appended under code 31241_ot, aum_43854_Others -> appended under code 43854_ot),
     and appends a single 'Total Book' summary row.
     """
     all_rows = []
@@ -895,7 +961,11 @@ def build_sheet3_from_aum_files(aum_files_input):
                 for sname in xls.sheet_names:
                     s_lower = sname.strip().lower()
 
-                    if "31241" in s_lower:
+                    if "31241_others" in s_lower or "31241_ot" in s_lower or "31241_other" in s_lower:
+                        target_code = "31241_ot"
+                    elif "43854_others" in s_lower or "43854_ot" in s_lower or "43854_other" in s_lower:
+                        target_code = "43854_ot"
+                    elif "31241" in s_lower:
                         target_code = "31241"
                     elif "43854" in s_lower:
                         target_code = "43854"
@@ -942,7 +1012,7 @@ def build_sheet3_from_aum_files(aum_files_input):
     df_res = pd.DataFrame(all_rows, columns=SCHEME_MASTER_SCHEMA)
 
     if not df_res.empty:
-        code_order = {31241.0: 1, 19221.0: 2, 43854.0: 3, 72021.0: 4}
+        code_order = {31241.0: 1, '31241_ot': 2, 19221.0: 3, 43854.0: 4, '43854_ot': 5, 72021.0: 6}
         def get_sort_key(c):
             if c in code_order: return code_order[c]
             try:
@@ -967,6 +1037,7 @@ def build_sheet3_from_aum_files(aum_files_input):
 
     df_res = pd.concat([df_res, pd.DataFrame([tot_row])], ignore_index=True)
     return df_res
+
 def purge_and_write_sheet(wb, sheet_name, df, expected_schema):
     """
     Completely deletes existing worksheet object to clear historical rows,
@@ -1027,7 +1098,7 @@ def update_master_sheets_from_all_codes(client_files_input, aum_files_input):
 # 3. INTERFACE NAVIGATION PANEL & SIDEBAR CONTROLS
 # -----------------------------------------------------------------------------
 st.sidebar.title("🛠️ Sahyog Financials Workspace")
-st.sidebar.caption("Enterprise Consolidated Architecture v10.5")
+st.sidebar.caption("Enterprise Consolidated Architecture v10.0")
 
 current_user = st.session_state.get("username", "User")
 st.sidebar.info(f"👤 Logged in as: **{current_user}**")
@@ -1061,95 +1132,107 @@ workspace = st.sidebar.radio("Navigate Module Panel:", nav_options)
 
 st.sidebar.markdown("---")
 
+# PRIMARY DESIGNATED SYNC ADMINISTRATOR USERS LIST
+PRIMARY_SYNC_USERS = ["admin", "malay"]
+
 # 2-STEP DECOUPLED SYNC CONTROLLER (FETCH & MERGE SEPARATED)
 st.sidebar.markdown("#### 🤖 Live Portal Data Sync")
 
-from portal_scraper import (
-    get_last_sync_status, 
-    record_sync_completed, 
-    fetch_all_portal_sheets, 
-    scan_downloaded_feed_files
-)
+is_sync_user = current_user.lower() in [u.lower() for u in PRIMARY_SYNC_USERS]
 
-sync_info = get_last_sync_status()
-last_sync_date_str = sync_info.get("last_sync_date")
-last_sync_time_str = sync_info.get("last_sync_time")
-
-already_synced_this_week = False
-days_since_sync = None
-
-if last_sync_date_str:
-    try:
-        last_date = datetime.datetime.strptime(last_sync_date_str, "%Y-%m-%d").date()
-        days_since_sync = (datetime.date.today() - last_date).days
-        already_synced_this_week = (days_since_sync < 7)
-    except Exception:
-        already_synced_this_week = False
-
-if already_synced_this_week:
-    st.sidebar.info(f"📅 **Synced {days_since_sync} day(s) ago:** \n`{last_sync_time_str}`")
-    force_sync = st.sidebar.checkbox("Force re-sync before 1-week window", value=False)
+if not is_sync_user:
+    st.sidebar.info(
+        "🔒 **Sync Controller Locked**\n\n"
+        "Portal scraping and master sheet merging are designated exclusively to primary sync administrators (`admin`, `malay`). "
+        "This prevents simultaneous multi-user container memory overruns and Google Drive file write collisions."
+    )
 else:
-    if last_sync_time_str:
-        st.sidebar.caption(f"Last Sync: {last_sync_time_str} ({days_since_sync} days ago)")
-    else:
-        st.sidebar.caption("Last Sync: Never executed")
-    force_sync = True
+    from portal_scraper import (
+        get_last_sync_status, 
+        record_sync_completed, 
+        fetch_all_portal_sheets, 
+        scan_downloaded_feed_files
+    )
 
-col_s1, col_s2 = st.sidebar.columns(2)
+    sync_info = get_last_sync_status()
+    last_sync_date_str = sync_info.get("last_sync_date")
+    last_sync_time_str = sync_info.get("last_sync_time")
 
-# Step 1: Download from portal only
-if col_s1.button("📥 1. Fetch Feeds", use_container_width=True, help="Download latest sheets from portal into temp_downloads directory"):
-    if already_synced_this_week and not force_sync:
-        st.sidebar.warning("⚠️ Portal sheets were downloaded recently. Check 'Force re-sync' to download again.")
-    else:
-        with st.spinner("Logging into portals across all codes & pulling reports..."):
-            try:
-                res = fetch_all_portal_sheets(headless=True)
-                ok_count = sum(1 for v in res.values() if v["client_ok"] or v["aum_ok"])
-                st.sidebar.success(f"✅ Fetched reports for {ok_count} code(s) into `temp_downloads/`!")
-            except Exception as e:
-                st.sidebar.error(f"❌ Portal Fetch Error: {e}")
+    already_synced_this_week = False
+    days_since_sync = None
 
-# Step 2: Merge local & downloaded feeds into Live Wealth Manager Book
-if col_s2.button("💾 2. Merge Book", use_container_width=True, help="Ingest all files from temp_downloads/ & root into Live Wealth Manager Book"):
-    with st.spinner("Scanning local feeds and merging into Master Sheets 2 & 3..."):
+    if last_sync_date_str:
         try:
-            c_files, a_files = scan_downloaded_feed_files()
-            if c_files or a_files:
-                success = update_master_sheets_from_all_codes(c_files, a_files)
-                if success:
-                    record_sync_completed()
-                    st.sidebar.success("✅ Master Sheets 2 & 3 Updated & Merged Successfully!")
-                    st.rerun()
-                else:
-                    st.sidebar.error("❌ Failed to write merged data to workbook.")
-            else:
-                st.sidebar.warning("⚠️ No feed files found in `temp_downloads/` or root directory.")
-        except Exception as e:
-            st.sidebar.error(f"❌ Ingestion / Merge Error: {e}")
+            last_date = datetime.datetime.strptime(last_sync_date_str, "%Y-%m-%d").date()
+            days_since_sync = (datetime.date.today() - last_date).days
+            already_synced_this_week = (days_since_sync < 7)
+        except Exception:
+            already_synced_this_week = False
 
-# Full Automated Sync (Step 1 + Step 2 in sequence)
-if st.sidebar.button("🔄 Full Sync (Fetch + Merge)", use_container_width=True):
-    if already_synced_this_week and not force_sync:
-        st.sidebar.warning("⚠️ Master sheets were updated within 7 days. Check 'Force re-sync' to overwrite.")
+    if already_synced_this_week:
+        st.sidebar.info(f"📅 **Synced {days_since_sync} day(s) ago:** \n`{last_sync_time_str}`")
+        force_sync = st.sidebar.checkbox("Force re-sync before 1-week window", value=False)
     else:
-        with st.spinner("Fetching portal sheets & merging into Master Workbook..."):
+        if last_sync_time_str:
+            st.sidebar.caption(f"Last Sync: {last_sync_time_str} ({days_since_sync} days ago)")
+        else:
+            st.sidebar.caption("Last Sync: Never executed")
+        force_sync = True
+
+    col_s1, col_s2 = st.sidebar.columns(2)
+
+    # Step 1: Download from portal only
+    if col_s1.button("📥 1. Fetch Feeds", use_container_width=True, help="Download latest sheets from portal into temp_downloads directory"):
+        if already_synced_this_week and not force_sync:
+            st.sidebar.warning("⚠️ Portal sheets were downloaded recently. Check 'Force re-sync' to download again.")
+        else:
+            with st.spinner("Logging into portals across all codes & pulling reports..."):
+                try:
+                    res = fetch_all_portal_sheets(headless=True)
+                    ok_count = sum(1 for v in res.values() if v["client_ok"] or v["aum_ok"])
+                    st.sidebar.success(f"✅ Fetched reports for {ok_count} code(s) into `temp_downloads/`!")
+                except Exception as e:
+                    st.sidebar.error(f"❌ Portal Fetch Error: {e}")
+
+    # Step 2: Merge local & downloaded feeds into Live Wealth Manager Book
+    if col_s2.button("💾 2. Merge Book", use_container_width=True, help="Ingest all files from temp_downloads/ & root into Live Wealth Manager Book"):
+        with st.spinner("Scanning local feeds and merging into Master Sheets 2 & 3..."):
             try:
-                fetch_all_portal_sheets(headless=True)
                 c_files, a_files = scan_downloaded_feed_files()
                 if c_files or a_files:
                     success = update_master_sheets_from_all_codes(c_files, a_files)
                     if success:
                         record_sync_completed()
-                        st.sidebar.success("✅ Full Automated Sync & Merge Completed!")
+                        st.sidebar.success("✅ Master Sheets 2 & 3 Updated & Merged Successfully!")
                         st.rerun()
                     else:
-                        st.sidebar.error("❌ Failed to write scraped data to workbook.")
+                        st.sidebar.error("❌ Failed to write merged data to workbook.")
                 else:
-                    st.sidebar.warning("⚠️ Scraper completed, but no data files were found.")
+                    st.sidebar.warning("⚠️ No feed files found in `temp_downloads/` or root directory.")
             except Exception as e:
-                st.sidebar.error(f"❌ Full Sync Error: {e}")
+                st.sidebar.error(f"❌ Ingestion / Merge Error: {e}")
+
+    # Full Automated Sync (Step 1 + Step 2 in sequence)
+    if st.sidebar.button("🔄 Full Sync (Fetch + Merge)", use_container_width=True):
+        if already_synced_this_week and not force_sync:
+            st.sidebar.warning("⚠️ Master sheets were updated within 7 days. Check 'Force re-sync' to overwrite.")
+        else:
+            with st.spinner("Fetching portal sheets & merging into Master Workbook..."):
+                try:
+                    fetch_all_portal_sheets(headless=True)
+                    c_files, a_files = scan_downloaded_feed_files()
+                    if c_files or a_files:
+                        success = update_master_sheets_from_all_codes(c_files, a_files)
+                        if success:
+                            record_sync_completed()
+                            st.sidebar.success("✅ Full Automated Sync & Merge Completed!")
+                            st.rerun()
+                        else:
+                            st.sidebar.error("❌ Failed to write scraped data to workbook.")
+                    else:
+                        st.sidebar.warning("⚠️ Scraper completed, but no data files were found.")
+                except Exception as e:
+                    st.sidebar.error(f"❌ Full Sync Error: {e}")
 
 
 def find_matching_code_index(raw_val, code_list):
@@ -1168,14 +1251,14 @@ def find_matching_code_index(raw_val, code_list):
 
 
 # -----------------------------------------------------------------------------
-# MODULE 1: LOG TRANSACTION FORM DESK (WITH SMART AUTOFILL)
+# MODULE 1: LOG MULTI-FUND TRANSACTION FORM DESK (WITH SMART AUTOFILL)
 # -----------------------------------------------------------------------------
 if workspace == "📝 Log Transaction":
-    st.title("Log Transaction")
-    st.caption("Transactions entered here are written permanently back to the Master Ledger.")
+    st.title("Log Investor Transactions")
+    st.caption("Log single or multi-fund orders in one batch. Transactions are written permanently back to the Master Ledger, Google Sheets & Google Drive.")
     st.markdown("---")
 
-    st.markdown("#### 👤 Select Investor (Triggers Intelligent Data Autofill)")
+    st.markdown("#### 👤 Step 1: Select Investor (Triggers Intelligent Profile Autofill)")
     client_select = st.selectbox(
         "Choose Existing Investor from Database:", 
         ["-- Custom / New Investor Entry --"] + client_options,
@@ -1221,97 +1304,208 @@ if workspace == "📝 Log Transaction":
 
         st.success(f"⚡ Smart Autofill Active for **{client_select}**: UCC/Folio, Bank Details & Default License Code auto-loaded!")
 
-    with st.form("persistent_form", clear_on_submit=True):
-        st.markdown("<div class='section-header'>1. Core Transaction Details</div>", unsafe_allow_html=True)
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            txn_date = st.date_input("Date", datetime.date.today())
-            final_name = st.text_input("Investor Name", value=autofill_name, placeholder="Type investor full name")
-        with c2:
-            txn_amount = st.number_input("Amount (₹)", min_value=0.0, step=1000.0)
-            txn_type = st.selectbox("TYPE", [
-                "Purchase", "Redemption", "SIP", "SWP", "STP", "Switch",
-                "PMS Subscription", "PMS Top-Up", "PMS Redemption"
-            ])
-        with c3:
-            ucc_folio = st.text_input("Ucc / APP./FOLIO NO.", value=autofill_ucc)
-            top_up = st.selectbox("Top Up", ["No", "Yes"])
+    st.markdown("#### 🛒 Step 2: Configure Multi-Fund Order Details")
+    col_fc1, col_fc2 = st.columns([1.5, 3])
+    with col_fc1:
+        num_funds = st.number_input(
+            "Number of Funds / Schemes to log in this order:",
+            min_value=1,
+            max_value=10,
+            value=1,
+            step=1,
+            help="Select how many fund allocations you wish to enter in this single transaction batch"
+        )
+    with col_fc2:
+        st.info(
+            "💡 **Date & Mandate Rules:**\n"
+            "- **FROM (Start Date)** & **TO (End Date)** default to **None (blank)**.\n"
+            "- They are **compulsory** only when transaction TYPE is **SIP, SWP, STP, Switch, or Switch SIP**.\n"
+            "- For lump-sum orders (Purchase / Redemption / PMS), leave date fields blank."
+        )
 
-        st.markdown("<div class='section-header'>2. Asset Class & Routing Channels</div>", unsafe_allow_html=True)
+    with st.form("multi_fund_persistent_form", clear_on_submit=True):
+        st.markdown("<div class='section-header'>1. Investor & Banking Rails (Applied to Batch)</div>", unsafe_allow_html=True)
         c1, c2, c3 = st.columns(3)
         with c1:
-            scheme_select = st.selectbox("SCHEME (Select Pre-loaded Product/Fund)", ["-- Custom / PMS Entry --"] + scheme_options)
-            scheme_custom = st.text_input("SCHEME (Type custom product / strategy name)")
-            final_scheme = scheme_custom if scheme_select == "-- Custom / PMS Entry --" else scheme_select
+            txn_date = st.date_input("Transaction Booking Date", datetime.date.today())
+            final_name = st.text_input("Investor Full Name *", value=autofill_name, placeholder="Type investor name")
+            ucc_folio = st.text_input("UCC / APP / Folio No.", value=autofill_ucc)
         with c2:
-            from_target = st.text_input("FROM (Source scheme for Switch/STP)")
+            prod_code = st.selectbox("Distribution License Code", code_list, index=autofill_code_idx)
+            stname_subbroker = st.selectbox("STNAME (Platform Rail)", ["NJ", "MFU"])
+            top_up = st.selectbox("Top Up Order?", ["No", "Yes"])
         with c3:
-            to_target = st.text_input("TO (Destination target scheme for Switch/STP)")
-
-        st.markdown("<div class='section-header'>3. Banking Rails & Compliance Audit Details</div>", unsafe_allow_html=True)
-        c1, c2, c3 = st.columns(3)
-        with c1:
             pay_idx = payment_options.index(autofill_payment) if autofill_payment in payment_options else 0
             payment_detail = st.selectbox("PAYMENT DETAIL", payment_options, index=pay_idx)
-            bank_detail = st.text_input("BANK DETAIL (Bank Name & A/c details)", value=autofill_bank)
-        with c2:
-            prod_code = st.selectbox("Code", code_list, index=autofill_code_idx)
-            stname_subbroker = st.selectbox("STNAME (Sub Broker Name)", ["NJ", "MFU"])
-            exit_load_val = st.text_input("EXIT LOAD (e.g. 1%)")
-        with c3:
-            remark = st.text_input("REMARK")
-            other_remarks = st.text_area("Other Remarks", height=68)
+            bank_detail = st.text_input("BANK DETAIL (Bank Name & A/c)", value=autofill_bank)
 
-        st.markdown("<div class='section-header'>4. Audit Tracking & Creator Signature</div>", unsafe_allow_html=True)
-        c_audit1, c_audit2 = st.columns(2)
-        with c_audit1:
+        st.markdown(f"<div class='section-header'>2. Fund Allocations ({num_funds} Line Item{'s' if num_funds > 1 else ''})</div>", unsafe_allow_html=True)
+        
+        fund_entries = []
+        for i in range(1, num_funds + 1):
+            st.markdown(f"**🔹 Fund Allocation #{i}**")
+            
+            # Row 1: Scheme & Custom Scheme
+            s_col1, s_col2 = st.columns([2.5, 2.5])
+            with s_col1:
+                scheme_select = st.selectbox(
+                    f"SCHEME #{i} (Select Pre-loaded Fund)",
+                    ["-- Select Scheme --", "-- Custom / PMS Entry --"] + scheme_options,
+                    key=f"scheme_sel_{i}"
+                )
+            with s_col2:
+                scheme_custom = st.text_input(
+                    f"Custom Scheme / Strategy Name #{i}",
+                    placeholder="Enter custom fund name if not listed above",
+                    key=f"scheme_cust_{i}"
+                )
+            final_scheme = scheme_custom.strip() if scheme_select == "-- Custom / PMS Entry --" else (scheme_select if scheme_select != "-- Select Scheme --" else (scheme_custom.strip() if scheme_custom else ""))
+
+            # Row 2: Type, Amount, Exit Load
+            r2_col1, r2_col2, r2_col3 = st.columns([1.5, 1.5, 1.5])
+            with r2_col1:
+                txn_type = st.selectbox(
+                    f"TYPE #{i} *",
+                    [
+                        "Purchase", "SIP", "STP", "SWP", "Switch", "Switch SIP",
+                        "Redemption", "PMS Subscription", "PMS Top-Up", "PMS Redemption"
+                    ],
+                    key=f"type_{i}"
+                )
+            with r2_col2:
+                txn_amount = st.number_input(
+                    f"Amount (₹) #{i} *",
+                    min_value=0.0,
+                    step=1000.0,
+                    key=f"amt_{i}"
+                )
+            with r2_col3:
+                exit_load_val = st.text_input(f"EXIT LOAD #{i}", value="1% for 1 Year", key=f"exit_load_{i}")
+
+            # Row 3: FROM & TO Date fields (None by default)
+            d_col1, d_col2 = st.columns(2)
+            with d_col1:
+                from_date = st.date_input(
+                    f"FROM (Mandate Start Date) #{i} [Compulsory for SIP/SWP/STP/Switch/Switch SIP]",
+                    value=None,
+                    key=f"from_dt_{i}",
+                    help="Mandate start date. Compulsory for SIP, SWP, STP, Switch, Switch SIP."
+                )
+            with d_col2:
+                to_date = st.date_input(
+                    f"TO (Mandate End Date) #{i} [Compulsory for SIP/SWP/STP/Switch/Switch SIP]",
+                    value=None,
+                    key=f"to_dt_{i}",
+                    help="Mandate end date. Compulsory for SIP, SWP, STP, Switch, Switch SIP."
+                )
+
+            fund_entries.append({
+                "scheme": final_scheme,
+                "type": txn_type,
+                "amount": txn_amount,
+                "from_date": from_date,
+                "to_date": to_date,
+                "exit_load": exit_load_val
+            })
+            if i < num_funds:
+                st.markdown("<hr style='margin: 15px 0; border-top: 1px dashed #ccc;'>", unsafe_allow_html=True)
+
+        st.markdown("<div class='section-header'>3. Compliance Audit & Remarks</div>", unsafe_allow_html=True)
+        c_rem1, c_rem2, c_rem3 = st.columns(3)
+        with c_rem1:
+            remark = st.text_input("Common Order Remark")
+        with c_rem2:
+            other_remarks = st.text_input("Other Remarks / Mandate Ref")
+        with c_rem3:
             logged_by = st.text_input("Entry created by (Logged by)", value=current_user)
-        with c_audit2:
-            st.info("ℹ️ **Verification Note:** 'Entry checked by' is saved as empty initially. Auditors can check entries using the tick box in the Master Ledger.")
 
-        submit = st.form_submit_button("Save Permanently to Database")
+        submit = st.form_submit_button(f"💾 Save All {num_funds} Transaction(s) to Master Database", type="primary", use_container_width=True)
 
         if submit:
             if not final_name or final_name.strip() == "":
-                st.error("❌ Save Refused: 'Name' is a required field.")
-            elif txn_amount <= 0:
-                st.error("❌ Save Refused: 'Amount' must be greater than zero.")
-            elif "PMS" in txn_type and "Subscription" in txn_type and txn_amount < 5000000:
-                st.error("❌ Regulatory Halt: Fresh PMS mandates cannot fall below the SEBI mandate of ₹50 Lakhs.")
+                st.error("❌ Save Refused: 'Investor Name' is a required field.")
             else:
-                new_record = {
-                    "Date": str(txn_date),
-                    "Name": final_name,
-                    "Amount": float(txn_amount),
-                    "Ucc / APP./FOLIO NO.": clean_int_string(ucc_folio),
-                    "SCHEME": final_scheme,
-                    "TYPE": txn_type,
-                    "Top Up": top_up,
-                    "FROM": from_target,
-                    "TO": to_target,
-                    "PAYMENT DETAIL": payment_detail,
-                    "BANK DETAIL": bank_detail,
-                    "REMARK": remark,
-                    "Code": prod_code,
-                    "STNAME": stname_subbroker,
-                    "EXIT LOAD": exit_load_val,
-                    "Other Remarks": other_remarks,
-                    "Entry checked by": "",
-                    "Entry created by": logged_by,
-                    "Last edited by": "",
-                    "Last edit timestamp": ""
-                }
-                was_gs = save_transaction_record(new_record)
-                if was_gs:
-                    st.success("⚡ Transaction appended directly to your Live Google Sheet in real time!")
-                else:
-                    st.success("💾 Transaction saved locally inside the central workbook!")
-                st.rerun()
+                records_to_save = []
+                validation_failed = False
+
+                for idx, f_entry in enumerate(fund_entries, start=1):
+                    f_scheme = f_entry["scheme"]
+                    f_type = f_entry["type"]
+                    f_amt = f_entry["amount"]
+                    f_from_date = format_date_val(f_entry["from_date"])
+                    f_to_date = format_date_val(f_entry["to_date"])
+                    f_exit = f_entry["exit_load"].strip()
+
+                    t_upper = f_type.upper()
+                    is_tenure = any(k in t_upper for k in ["SIP", "STP", "SWP", "SWITCH"])
+
+                    # 1. Scheme Validation
+                    if not f_scheme or f_scheme == "":
+                        if f_amt > 0:
+                            st.error(f"❌ Fund #{idx}: Please select or enter a Scheme name.")
+                            validation_failed = True
+                            break
+                        continue  # skip completely blank line item
+
+                    # 2. Amount Validation
+                    if f_amt <= 0:
+                        st.error(f"❌ Fund #{idx} ({f_scheme}): Amount must be greater than zero.")
+                        validation_failed = True
+                        break
+
+                    if "PMS" in t_upper and "SUBSCRIPTION" in t_upper and f_amt < 5000000:
+                        st.error(f"❌ Regulatory Halt on Fund #{idx}: Fresh PMS mandates cannot fall below the SEBI mandate of ₹50 Lakhs.")
+                        validation_failed = True
+                        break
+
+                    # 3. Compulsory Date Validation for SIP / SWP / STP / Switch / Switch SIP
+                    if is_tenure:
+                        if not f_from_date or not f_to_date:
+                            st.error(f"❌ Fund #{idx} ({f_type}): 'FROM' (Start Date) and 'TO' (End Date) are compulsory fields for {f_type} transactions.")
+                            validation_failed = True
+                            break
+                        if f_to_date < f_from_date:
+                            st.error(f"❌ Fund #{idx} ({f_type}): 'TO' (End Date: {f_to_date}) cannot be earlier than 'FROM' (Start Date: {f_from_date}).")
+                            validation_failed = True
+                            break
+
+                    new_record = {
+                        "Date": str(txn_date),
+                        "Name": final_name.strip(),
+                        "Amount": float(f_amt),
+                        "Ucc / APP./FOLIO NO.": clean_int_string(ucc_folio),
+                        "SCHEME": f_scheme,
+                        "TYPE": f_type,
+                        "Top Up": top_up,
+                        "FROM": f_from_date,
+                        "TO": f_to_date,
+                        "PAYMENT DETAIL": payment_detail,
+                        "BANK DETAIL": bank_detail,
+                        "REMARK": remark,
+                        "Code": prod_code,
+                        "STNAME": stname_subbroker,
+                        "EXIT LOAD": f_exit,
+                        "Other Remarks": other_remarks,
+                        "Entry checked by": "",
+                        "Entry created by": logged_by,
+                        "Last edited by": "",
+                        "Last edit timestamp": ""
+                    }
+                    records_to_save.append(new_record)
+
+                if not validation_failed:
+                    if not records_to_save:
+                        st.error("❌ Save Refused: No valid fund allocations entered. Please fill in at least one scheme with an amount > ₹0.")
+                    else:
+                        was_gs = save_transaction_records(records_to_save)
+                        total_logged_val = sum(r["Amount"] for r in records_to_save)
+                        if was_gs:
+                            st.success(f"⚡ Successfully logged {len(records_to_save)} transaction(s) totaling ₹{total_logged_val:,.2f} directly to Google Sheets & central workbook!")
+                        else:
+                            st.success(f"💾 Successfully saved {len(records_to_save)} transaction(s) totaling ₹{total_logged_val:,.2f} locally and synced to Google Drive!")
+                        st.rerun()
 
 
-# -----------------------------------------------------------------------------
-# MODULE 2: ADVANCED DEMOGRAPHICS LOOKUPS DESK
-# -----------------------------------------------------------------------------
 elif workspace == "🔍 Advanced Demographics Desk":
     st.title("Advanced Demographics & Investor Lookups Desk")
     st.caption("Query the fully enriched multi-branch master database using micro-demographic tracking keys.")
@@ -1535,7 +1729,7 @@ elif workspace == "📊 Book Summary & Analytics":
             )
 
         
-                        # TAB FOR INTERACTIVE SCHEME INSIGHTS & EXPLORER
+        # TAB FOR INTERACTIVE SCHEME INSIGHTS & EXPLORER
         with tab_schemes:
             st.markdown("### 📈 Interactive Scheme Explorer & Revenue Analytics")
             st.caption("Filter, slice, and analyze scheme performance, concentration risk, yield optimization, asset allocation, and brokerage multipliers across fund houses and license codes.")
