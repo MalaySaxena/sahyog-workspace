@@ -1098,7 +1098,7 @@ def update_master_sheets_from_all_codes(client_files_input, aum_files_input):
 # 3. INTERFACE NAVIGATION PANEL & SIDEBAR CONTROLS
 # -----------------------------------------------------------------------------
 st.sidebar.title("🛠️ Sahyog Financials Workspace")
-st.sidebar.caption("Enterprise Consolidated Architecture v10.0")
+st.sidebar.caption("Enterprise v10.0")
 
 current_user = st.session_state.get("username", "User")
 st.sidebar.info(f"👤 Logged in as: **{current_user}**")
@@ -1121,12 +1121,12 @@ st.sidebar.markdown("---")
 # DYNAMIC NAVIGATION (RBAC WITHOUT WARNING BANNERS)
 nav_options = [
     "📝 Log Transaction",
-    "🔍 Advanced Demographics Desk",
-    "🗃️ View & Edit Master Ledger"
+    "🔍 Clients Lookup",
+    "🗃️ Data Entry Ledger"
 ]
 
 if current_user.lower() in [u.lower() for u in ALLOWED_ANALYTICS_USERS]:
-    nav_options.append("📊 Book Summary & Analytics")
+    nav_options.append("📊 Business Intelligence")
 
 workspace = st.sidebar.radio("Navigate Module Panel:", nav_options)
 
@@ -1251,14 +1251,14 @@ def find_matching_code_index(raw_val, code_list):
 
 
 # -----------------------------------------------------------------------------
-# MODULE 1: LOG MULTI-FUND TRANSACTION FORM DESK (WITH SMART AUTOFILL)
+# MODULE 1: LOG MULTI-FUND TRANSACTION FORM DESK (WITH SMART AUTOFILL & TO SCHEME)
 # -----------------------------------------------------------------------------
 if workspace == "📝 Log Transaction":
-    st.title("Log Investor Transactions")
+    st.title("Log Transaction")
     st.caption("Log single or multi-fund orders in one batch. Transactions are written permanently back to the Master Ledger, Google Sheets & Google Drive.")
     st.markdown("---")
 
-    st.markdown("#### 👤 Step 1: Select Investor (Triggers Intelligent Profile Autofill)")
+    st.markdown("#### 👤 Step 1: Select Investor")
     client_select = st.selectbox(
         "Choose Existing Investor from Database:", 
         ["-- Custom / New Investor Entry --"] + client_options,
@@ -1304,7 +1304,7 @@ if workspace == "📝 Log Transaction":
 
         st.success(f"⚡ Smart Autofill Active for **{client_select}**: UCC/Folio, Bank Details & Default License Code auto-loaded!")
 
-    st.markdown("#### 🛒 Step 2: Configure Multi-Fund Order Details")
+    st.markdown("#### 🛒 Step 2: Number of Funds")
     col_fc1, col_fc2 = st.columns([1.5, 3])
     with col_fc1:
         num_funds = st.number_input(
@@ -1317,14 +1317,15 @@ if workspace == "📝 Log Transaction":
         )
     with col_fc2:
         st.info(
-            "💡 **Date & Mandate Rules:**\n"
-            "- **FROM (Start Date)** & **TO (End Date)** default to **None (blank)**.\n"
-            "- They are **compulsory** only when transaction TYPE is **SIP, SWP, STP, Switch, or Switch SIP**.\n"
-            "- For lump-sum orders (Purchase / Redemption / PMS), leave date fields blank."
+            "💡 **Transaction & Mandate Rules:**\n"
+            "- **FROM (Start Date)** & **TO (End Date)** are **compulsory** for **SIP, SWP, STP, Switch, and Switch SIP**.\n"
+            "- **TO SCHEME (Target Fund)** is **compulsory** when transaction TYPE is **Switch or Switch SIP**.\n"
+            "- In Switch orders, **TO SCHEME** is saved in the **SCHEME** column and **FROM SCHEME** is recorded in **REMARKS**.\n"
+            "- For lump-sum orders (Purchase / Redemption / PMS), leave mandate date and To Scheme fields blank."
         )
 
     with st.form("multi_fund_persistent_form", clear_on_submit=True):
-        st.markdown("<div class='section-header'>1. Investor & Banking Rails (Applied to Batch)</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-header'>1. Investor & Banking Details</div>", unsafe_allow_html=True)
         c1, c2, c3 = st.columns(3)
         with c1:
             txn_date = st.date_input("Transaction Booking Date", datetime.date.today())
@@ -1345,17 +1346,17 @@ if workspace == "📝 Log Transaction":
         for i in range(1, num_funds + 1):
             st.markdown(f"**🔹 Fund Allocation #{i}**")
             
-            # Row 1: Scheme & Custom Scheme
+            # Row 1: Source Scheme & Custom Source Scheme
             s_col1, s_col2 = st.columns([2.5, 2.5])
             with s_col1:
                 scheme_select = st.selectbox(
-                    f"SCHEME #{i} (Select Pre-loaded Fund)",
+                    f"SOURCE / FROM SCHEME #{i} (Select Pre-loaded Fund)",
                     ["-- Select Scheme --", "-- Custom / PMS Entry --"] + scheme_options,
                     key=f"scheme_sel_{i}"
                 )
             with s_col2:
                 scheme_custom = st.text_input(
-                    f"Custom Scheme / Strategy Name #{i}",
+                    f"Custom Source Scheme / Strategy Name #{i}",
                     placeholder="Enter custom fund name if not listed above",
                     key=f"scheme_cust_{i}"
                 )
@@ -1382,25 +1383,43 @@ if workspace == "📝 Log Transaction":
             with r2_col3:
                 exit_load_val = st.text_input(f"EXIT LOAD #{i}", value="1% for 1 Year", key=f"exit_load_{i}")
 
-            # Row 3: FROM & TO Date fields (None by default)
+            # Row 3: TO SCHEME (Target Fund for Switch / Switch SIP)
+            to_s_col1, to_s_col2 = st.columns([2.5, 2.5])
+            with to_s_col1:
+                to_scheme_select = st.selectbox(
+                    f"TO SCHEME #{i} [Compulsory for Switch / Switch SIP]",
+                    ["-- Select Target Scheme --", "-- Custom Target Fund --"] + scheme_options,
+                    key=f"to_scheme_sel_{i}",
+                    help="Target destination fund for Switch or Switch SIP orders."
+                )
+            with to_s_col2:
+                to_scheme_custom = st.text_input(
+                    f"Custom TO SCHEME #{i}",
+                    placeholder="Enter custom target fund name if not listed above",
+                    key=f"to_scheme_cust_{i}"
+                )
+            final_to_scheme = to_scheme_custom.strip() if to_scheme_select == "-- Custom Target Fund --" else (to_scheme_select if to_scheme_select != "-- Select Target Scheme --" else (to_scheme_custom.strip() if to_scheme_custom else ""))
+
+            # Row 4: FROM & TO Date fields (None by default)
             d_col1, d_col2 = st.columns(2)
             with d_col1:
                 from_date = st.date_input(
-                    f"FROM (Mandate Start Date) #{i} [Compulsory for SIP/SWP/STP/Switch/Switch SIP]",
+                    f"FROM (Mandate Start Date) #{i} [Compulsory for SIP/SWP/STP/Switch SIP]",
                     value=None,
                     key=f"from_dt_{i}",
-                    help="Mandate start date. Compulsory for SIP, SWP, STP, Switch, Switch SIP."
+                    help="Mandate start date. Compulsory for SIP, SWP, STP, Switch SIP."
                 )
             with d_col2:
                 to_date = st.date_input(
-                    f"TO (Mandate End Date) #{i} [Compulsory for SIP/SWP/STP/Switch/Switch SIP]",
+                    f"TO (Mandate End Date) #{i} [Compulsory for SIP/SWP/STP/Switch SIP]",
                     value=None,
                     key=f"to_dt_{i}",
-                    help="Mandate end date. Compulsory for SIP, SWP, STP, Switch, Switch SIP."
+                    help="Mandate end date. Compulsory for SIP, SWP, STP, Switch SIP."
                 )
 
             fund_entries.append({
                 "scheme": final_scheme,
+                "to_scheme": final_to_scheme,
                 "type": txn_type,
                 "amount": txn_amount,
                 "from_date": from_date,
@@ -1413,13 +1432,13 @@ if workspace == "📝 Log Transaction":
         st.markdown("<div class='section-header'>3. Compliance Audit & Remarks</div>", unsafe_allow_html=True)
         c_rem1, c_rem2, c_rem3 = st.columns(3)
         with c_rem1:
-            remark = st.text_input("Common Order Remark")
+            remark = st.text_input("Units/Other Details")
         with c_rem2:
-            other_remarks = st.text_input("Other Remarks / Mandate Ref")
+            other_remarks = st.text_input("Remarks / Txn Ref")
         with c_rem3:
             logged_by = st.text_input("Entry created by (Logged by)", value=current_user)
 
-        submit = st.form_submit_button(f"💾 Save All {num_funds} Transaction(s) to Master Database", type="primary", use_container_width=True)
+        submit = st.form_submit_button(f"💾 Save All {num_funds} Transaction(s)", type="primary", use_container_width=True)
 
         if submit:
             if not final_name or final_name.strip() == "":
@@ -1430,6 +1449,7 @@ if workspace == "📝 Log Transaction":
 
                 for idx, f_entry in enumerate(fund_entries, start=1):
                     f_scheme = f_entry["scheme"]
+                    f_to_scheme = f_entry["to_scheme"]
                     f_type = f_entry["type"]
                     f_amt = f_entry["amount"]
                     f_from_date = format_date_val(f_entry["from_date"])
@@ -1437,17 +1457,29 @@ if workspace == "📝 Log Transaction":
                     f_exit = f_entry["exit_load"].strip()
 
                     t_upper = f_type.upper()
-                    is_tenure = any(k in t_upper for k in ["SIP", "STP", "SWP", "SWITCH"])
+                    is_tenure = any(k in t_upper for k in ["SIP", "STP", "SWP", "SWITCH SIP"])
+                    is_switch = ("SWITCH" in t_upper)
 
                     # 1. Scheme Validation
                     if not f_scheme or f_scheme == "":
                         if f_amt > 0:
-                            st.error(f"❌ Fund #{idx}: Please select or enter a Scheme name.")
+                            st.error(f"❌ Fund #{idx}: Please select or enter a Source Scheme name.")
                             validation_failed = True
                             break
                         continue  # skip completely blank line item
 
-                    # 2. Amount Validation
+                    # 2. To Scheme Validation for Switch / Switch SIP
+                    if is_switch:
+                        if not f_to_scheme or f_to_scheme == "":
+                            st.error(f"❌ Fund #{idx} ({f_type}): 'TO SCHEME' is compulsory for Switch and Switch SIP transactions.")
+                            validation_failed = True
+                            break
+                        if f_to_scheme.strip().lower() == f_scheme.strip().lower():
+                            st.error(f"❌ Fund #{idx} ({f_type}): 'TO SCHEME' cannot be identical to the Source Scheme.")
+                            validation_failed = True
+                            break
+
+                    # 3. Amount Validation
                     if f_amt <= 0:
                         st.error(f"❌ Fund #{idx} ({f_scheme}): Amount must be greater than zero.")
                         validation_failed = True
@@ -1458,7 +1490,7 @@ if workspace == "📝 Log Transaction":
                         validation_failed = True
                         break
 
-                    # 3. Compulsory Date Validation for SIP / SWP / STP / Switch / Switch SIP
+                    # 4. Compulsory Date Validation for SIP / SWP / STP / Switch / Switch SIP
                     if is_tenure:
                         if not f_from_date or not f_to_date:
                             st.error(f"❌ Fund #{idx} ({f_type}): 'FROM' (Start Date) and 'TO' (End Date) are compulsory fields for {f_type} transactions.")
@@ -1469,19 +1501,29 @@ if workspace == "📝 Log Transaction":
                             validation_failed = True
                             break
 
+                    # SCHEME & REMARK MAPPING FOR SWITCH VS REGULAR
+                    if is_switch and f_to_scheme:
+                        # User Rule: To Scheme in SCHEME field, From Scheme in REMARK field
+                        save_scheme_val = f_to_scheme.strip()
+                        from_scheme_tag = f"From: {f_scheme.strip()}"
+                        item_remark = f"{from_scheme_tag} | {remark.strip()}" if remark.strip() else from_scheme_tag
+                    else:
+                        save_scheme_val = f_scheme.strip()
+                        item_remark = remark.strip()
+
                     new_record = {
                         "Date": str(txn_date),
                         "Name": final_name.strip(),
                         "Amount": float(f_amt),
                         "Ucc / APP./FOLIO NO.": clean_int_string(ucc_folio),
-                        "SCHEME": f_scheme,
+                        "SCHEME": save_scheme_val,
                         "TYPE": f_type,
                         "Top Up": top_up,
                         "FROM": f_from_date,
                         "TO": f_to_date,
                         "PAYMENT DETAIL": payment_detail,
                         "BANK DETAIL": bank_detail,
-                        "REMARK": remark,
+                        "REMARK": item_remark,
                         "Code": prod_code,
                         "STNAME": stname_subbroker,
                         "EXIT LOAD": f_exit,
@@ -1506,9 +1548,9 @@ if workspace == "📝 Log Transaction":
                         st.rerun()
 
 
-elif workspace == "🔍 Advanced Demographics Desk":
-    st.title("Advanced Demographics & Investor Lookups Desk")
-    st.caption("Query the fully enriched multi-branch master database using micro-demographic tracking keys.")
+elif workspace == "🔍 Clients Lookup":
+    st.title("Clients Lookup")
+    st.caption("All clients data for all 4 codes")
     st.markdown("---")
     
     if df_master_clients.empty:
@@ -1561,8 +1603,8 @@ elif workspace == "🔍 Advanced Demographics Desk":
 # -----------------------------------------------------------------------------
 # MODULE 3: VIEW & EDIT MASTER LEDGER (WITH AUDITOR CHECKBOX)
 # -----------------------------------------------------------------------------
-elif workspace == "🗃️ View & Edit Master Ledger":
-    st.title("Permanent Transaction Audit Ledger & History Editor")
+elif workspace == "🗃️ Data Entry Ledger":
+    st.title("Data Entry Ledger")
     st.caption("Direct streaming logs retrieved from '4. Transaction Ledger' tab with live auditor verification tick box.")
     st.markdown("---")
 
@@ -1596,7 +1638,7 @@ elif workspace == "🗃️ View & Edit Master Ledger":
             df_ledger_display["Entry checked by"].apply(lambda x: True if pd.notna(x) and str(x).strip() != "" else False)
         )
 
-        st.markdown("### ✏️ Interactive Editable Ledger & Auditor Verification Desk")
+        st.markdown("### ✏️ Data Entry Desk")
         st.info(f"💡 **Instructions:** Tick the **'Verified (Tick Box)'** column to mark an entry as checked by auditor (**{current_user}**). Click **'💾 Save Ledger Modifications'** below when finished.")
         
         edited_df = st.data_editor(
@@ -1647,9 +1689,9 @@ elif workspace == "🗃️ View & Edit Master Ledger":
 
 
 # -----------------------------------------------------------------------------
-# MODULE 4: ENRICHED BOOK SUMMARY & ANALYTICS (WITH SCHEME TRIMMING DESK)
+# MODULE 4: ENRICHED BOOK SUMMARY & ANALYTICS
 # -----------------------------------------------------------------------------
-elif workspace == "📊 Book Summary & Analytics":
+elif workspace == "📊 Business Intelligence":
     st.title("Sahyog Financials Advanced Intelligence Desk")
     st.caption("Consolidated macro insights, distribution code breakdowns, sales leaderboards, AMC weights, and scheme trimming analytics.")
     st.markdown("---")
@@ -1657,7 +1699,6 @@ elif workspace == "📊 Book Summary & Analytics":
     if df_master_clients.empty or df_master_schemes.empty:
         st.error("Historical base sheets are missing from the workbook. Re-verify Excel file integrity.")
     else:
-        # EXPANDED 7-TAB ANALYTICS MATRIX INCLUDING INTERACTIVE SCHEME EXPLORER
         tab1, tab_schemes, tab2, tab3, tab4, tab5, tab6 = st.tabs([
             "🏠 Executive Overview", 
             "📈 Interactive Scheme Explorer",
@@ -2193,7 +2234,7 @@ elif workspace == "📊 Book Summary & Analytics":
                     }), use_container_width=True, hide_index=True
                 )
 
-        # TAB 3: CODE-WISE BREAKDOWN & COMPARATIVE INSIGHTS (INCLUDING 31241_ot AND 43854_ot)
+        # TAB 3: CODE-WISE BREAKDOWN & COMPARATIVE INSIGHTS
         with tab3:
             st.markdown("### 📌 Distribution License Code Breakdown & Insights")
             st.caption("Consolidated volume and asset class distribution across primary licenses and supplementary 'Others' holdings (31241_ot & 43854_ot).")
