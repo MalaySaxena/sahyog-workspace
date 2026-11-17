@@ -81,16 +81,7 @@ def check_credentials(username, password):
         pass
 
     default_users = {
-        "admin": "sahyog2026",
-        "sahyog": "wealth123",
-        "malay": "malay@sahyog",
-        "shishir": "shishir@sahyog",
-        "neelesh": "neelesh@sahyog",
-        "krati": "krati@sahyog",
-        "ayush": "ayush@sahyog",
-        "aayushi": "aayushi@sahyog",
-        "amit": "amit@sahyog",
-        "ruchi": "ruchi@sahyog"
+
     }
     return clean_username in default_users and default_users[clean_username] == password
 
